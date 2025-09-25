@@ -1,0 +1,86 @@
+
+- 포트 권한 부여
+sudo usermod -a -G dialout $USER
+
+
+# 1) 서비스 일시 중지 (코드 수정 전)
+sudo systemctl stop agv_server.service
+- stop → 서비스 프로세스를 종료
+
+# 2) (원하는 에디터로) 코드 수정 후 저장
+
+# 3) systemd에 변경 사항 알리기
+sudo systemctl daemon-reload
+- daemon-reload → 유닛 파일이나 실행 스크립트가 바뀌었을 때 systemd에 재인식시킴
+
+# 4) 수정된 코드로 다시 실행
+sudo systemctl start agv_server.service
+- start → 서비스를 다시 실행
+
+포트 규칙 저장
+
+만들기
+sudo nano /etc/udev/rules.d/99-usb-serial.rules
+
+파일 내용 예 (앞서 확인한 벤더·프로덕트로 교체):
+# /etc/udev/rules.d/99-usb-serial.rules
+# 특정 USB-Serial 디바이스에 대해 영구적인 심볼릭 링크 생성
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", \
+    SYMLINK+="ttyAGV", MODE="0666"
+    SUBSYSTEM=="tty": 시리얼 디바이스만
+
+ATTRS{idVendor}, ATTRS{idProduct}: 앞 단계에서 찾은 값
+SYMLINK+="ttyAGV": /dev/ttyAGV 라는 심볼릭 링크 생성
+MODE="0666": 모든 사용자에게 읽기·쓰기 권한 부여
+
+sudo udevadm control --reload
+sudo udevadm trigger
+
+- 같은 모델 아이디 및 벤더 아이디를 가질 경우
+ENV{ID_PATH} 조건으로 포트 위치(0:2.1 vs 0:2.4)를 구분 
+
+- rs485
+xtgt@ubuntu:~$ udevadm info -n /dev/ttyUSB1 -q property | grep -E 'ID_PATH|ID_SERIAL'
+ID_PATH=platform-3610000.xhci-usb-0:2.1:1.0
+ID_PATH_TAG=platform-3610000_xhci-usb-0_2_1_1_0
+ID_SERIAL=1a86_USB_Serial
+
+- pico
+xtgt@ubuntu:~$ udevadm info -n /dev/ttyUSB2 -q property | grep -E 'ID_PATH|ID_SERIAL'
+ID_PATH=platform-3610000.xhci-usb-0:2.4:1.0
+ID_PATH_TAG=platform-3610000_xhci-usb-0_2_4_1_0
+ID_SERIAL=1a86_USB2.0-Serial
+
+- usb 포트 규칙 저장 방법
+
+0. 포트 번호 등 설정 값 확인
+ - udevadm info -n /dev/ttyUSB1 -q property | grep -E 'ID_PATH|ID_SERIAL'
+ - udevadm info -n /dev/ttyUSB0 -q property
+
+0-1. 모델 id, 벤더 id 값 확인
+예시)
+model id = 7523
+vendor id = 1a86
+
+1. 규칙파일 생성
+sudo nano /etc/udev/rules.d/99-usb-serial.rules
+
+2. 아래 내용 저장
+# LiDAR (ttyUSB0)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
+    SYMLINK+="ttyLiDAR", MODE="0666"
+
+# RS485 모터 제어기 (ttyUSB1)
+SUBSYSTEM=="tty", ENV{ID_SERIAL}=="1a86_USB_Serial", \
+    SYMLINK+="ttyRS485", MODE="0666"
+
+# Pico 엔코더 (ttyUSB2)
+SUBSYSTEM=="tty", ENV{ID_SERIAL}=="1a86_USB2.0-Serial", \
+    SYMLINK+="ttyPICO", MODE="0666"
+
+3. 설정
+sudo udevadm control --reload
+sudo udevadm trigger
+
+4. 확인
+ls -l /dev/ttyLiDAR /dev/ttyRS485 /dev/ttyPICO
