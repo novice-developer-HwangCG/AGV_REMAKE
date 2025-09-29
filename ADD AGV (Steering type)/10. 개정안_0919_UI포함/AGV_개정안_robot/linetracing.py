@@ -8,7 +8,6 @@ import collections
 
 from rs485_motor import MotorController
 
-
 class LineTracer:
     """
     카메라 프레임으로 라인을 추적해 좌/우 바퀴 RPM을 산출하고,
@@ -40,8 +39,8 @@ class LineTracer:
     MORPH_ITERS = 2
 
     # --- 컨투어 필터 ---
-    MIN_AREA = 350
-    MAX_AREA = 50_000
+    MIN_AREA = 200
+    MAX_AREA = 60_000
     ASPECT_MIN = 0.2
     ASPECT_MAX = 5.0
     DIST_THRESH = 100  # tracking jump px
@@ -66,18 +65,6 @@ class LineTracer:
         3: 0.03,
         4: 0.024,
         5: 0.016,
-    }
-    KP_BWD_MAP = {
-        0: 0.0, 
-        1: 0.08,
-        2: 0.15,
-        3: 0.06,
-        4: 0.12,
-        5: 0.08,
-        6: 0, 
-        7: 0, 
-        8: 0, 
-        9: 0
     }
     DECEL_ZONE = {
         0: 0,
@@ -105,9 +92,9 @@ class LineTracer:
     }
     FORCE_STOP_THRESH = {
         0: 0,
-        1: 25,
-        2: 25,
-        3: 50,
+        1: 50,
+        2: 50,
+        3: 75,
         4: 100,
         5: 100,
         6: 0,
@@ -115,21 +102,11 @@ class LineTracer:
         8: 0,
         9: 0,
     }
-
-    # 후진용 추가 설정값
-    CAMERA_TO_REAR_DISTANCE = 150  # 카메라에서 후축까지의 거리 (mm)
-    BWD_LOOKAHEAD_FACTOR = 0.7     # 후진 시 예측 계수
-    BWD_DAMPING_FACTOR = 0.8       # 후진 시 제어 감쇠 계수
-
-    BWD_EDGE_TARGET = 0.60        # 후진 시 먼저 라인을 화면 가장자리 근처까지 보낼 목표 오프셋(|e|≈0.6)
-    BWD_SWITCH_TOL_IN = 0.15      # push→pull 전환 임계(타겟 근처에 왔을 때)
-    BWD_SWITCH_TOL_OUT = 0.25     # pull→push 복귀 임계(중앙 잡다 다시 벌어지면)
-
     # 엔코더 펄스→mm 환산 (로봇에 맞춰 유지)
     PULSES_TO_MM = 0.03795
 
     # 제어 파라미터
-    ACCEL_STEP = 40      # rpm/frame limit
+    ACCEL_STEP = 50      # rpm/frame limit
     DEAD_PIX = 2
     KD = 0.0025          # D게인 기본값(속도에 따라 스케일)
 
@@ -164,6 +141,9 @@ class LineTracer:
         self.pre_cx = None
         self.pre_cy = None
 
+        self.rear_view = False
+        self._last_rear_view = None
+
         # self.clahe = cv2.createCLAHE(self.CLAHE_CLIP, self.CLAHE_GRID)
         # self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, self.MORPH_KERNEL)
         # self.initial_center_set = False
@@ -175,11 +155,6 @@ class LineTracer:
         self.prev_error = 0.0
         self.prev_L = 0
         self.prev_R = 0
-
-        # 후진용 제어 변수 추가
-        self.bwd_error_buffer = collections.deque(maxlen=3)  # 에러 평활화용
-        self.bwd_prev_steer = 0.0  # 이전 조향값 저장
-        self.bwd_phase = 0
 
         # 모드 전환 감지
         self.last_mode = "manual"   # self.motor.get_mode
@@ -281,8 +256,6 @@ class LineTracer:
         self.prev_R = 0
         if self.auto_move == 0:
             self.motor.send_speeds(0, 0)
-        
-        self.bwd_phase = 1 if self.auto_move == 2 else 0
 
     def get_distance(self, mm: int):
         if mm != self.remaining_distance_mm:
@@ -444,9 +417,12 @@ class LineTracer:
                 remaining = max(0.0, self.target_distance_mm - self.traveled_mm)
                 self.set_remaining_distance(int(remaining))
             self.no_line = True
+            # self.initial_center_set = False
             self.auto_move = 0
             self.motor.send_speeds(0, 0)
             return binary, cx
+        else:
+            self.no_line = False
 
         # 라인 추적 제어
         error_px = (w // 2) - cx
@@ -457,59 +433,30 @@ class LineTracer:
         base_max = self.SPEED_MAP.get(self.auto_speed, 0)
         speed_scale = (self.auto_speed + 1) / 10.0  # 0.1 ~ 1.0
 
-        # 후진 모드면 조향 반전
+        e = error
+
         if self.auto_move == 2:
-            e = -error
-            if self.bwd_phase == 0:
-                self.bwd_phase = 1  # 안전장치
+            use_rear = bool(getattr(self, "rear_view", False))
+            if not use_rear:
+                e = -e
 
-            if self.bwd_phase == 1:
-                # PUSH: 라인을 화면 가장자리 근처까지 의도적으로 보냄
-                # e==0이면 이전 오차 부호를 우선 사용, 둘 다 0이면 + 방향
-                side = np.sign(e) if e != 0 else (np.sign(self.prev_error) if self.prev_error != 0 else 1.0)
-                target = side * self.BWD_EDGE_TARGET
-                e_ctrl = e - target
-                e_use  = -e_ctrl                 # 후진은 조향 부호 반전
-                if abs(e_ctrl) <= self.BWD_SWITCH_TOL_IN:
-                    self.bwd_phase = 2           # 충분히 끝에 붙었으면 중앙 복귀 단계로 전환
-            else:
-                # PULL: 중앙(0)으로 복귀
-                target = 0.0
-                e_ctrl = e - target
-                e_use  = -e_ctrl                 # 후진은 조향 부호 반전
-                if abs(e_ctrl) >= self.BWD_SWITCH_TOL_OUT:
-                    self.bwd_phase = 1           # 다시 벌어지면 push로 복귀
-            
-            self.bwd_error_buffer.append(e)
-            e_smooth = sum(self.bwd_error_buffer) / len(self.bwd_error_buffer)
+        Kp = self.KP_MAP.get(self.auto_kp, 0.0) * (1.0 + speed_scale)
+        Kd = self.KD * (1.0 + speed_scale)
 
-            Kp = self.KP_BWD_MAP.get(self.auto_kp, 0.0)
-            Kd = (0.001 if self.auto_speed < 5 else 0.0005) * (1.0 + speed_scale)
+        steer = Kp * e + Kd * (e - self.prev_error)
+        self.prev_error = e
 
-            raw_steer = Kp * e_smooth + Kd * (e_smooth - self.prev_error)
-            steer = self.BWD_DAMPING_FACTOR * self.bwd_prev_steer + (1.0 - self.BWD_DAMPING_FACTOR) * raw_steer
-            self.bwd_prev_steer = steer
-            self.prev_error = e_smooth
-
-            # 에러 클수록 보수적으로 감속
-            vel_scale = max(0.3 if self.auto_speed < 5 else 0.25,
-                            1.0 - (1.2 if self.auto_speed < 5 else 1.5) * min(abs(e_smooth), 1.0))
-            accel_step = int(self.ACCEL_STEP * (0.8 if self.auto_speed < 5 else 0.6))
-        else:   # 전진은 그대로
-            e = error
-            Kp = self.KP_MAP.get(self.auto_kp, 0.0) * (1.0 + speed_scale)
-            Kd = self.KD * (1.0 + speed_scale)
-
-            steer = Kp * e + Kd * (e - self.prev_error)
-            self.prev_error = e
-
-            vel_scale = max(0.4, 1.0 - min(abs(e), 1.0))
-            accel_step = self.ACCEL_STEP
+        vel_scale = max(0.4, 1.0 - min(abs(e), 1.0))
+        accel_step = self.ACCEL_STEP
 
         base = base_max * vel_scale
 
-        L = base - steer * base
-        R = base + steer * base
+        if self.auto_move == 2:
+            L = base + steer * base
+            R = base - steer * base
+        else:
+            L = base - steer * base
+            R = base + steer * base
 
         # 거리 기반 감속 적용
         if self.target_distance_mm > 0:
@@ -530,8 +477,8 @@ class LineTracer:
             send_L = -L
             send_R = R
         else:                        # reverse
-            send_L = L
-            send_R = -R
+            send_L = L  #     R
+            send_R = -R #    -L
 
         self.motor.send_speeds(int(send_L), int(send_R))
         return binary, cx

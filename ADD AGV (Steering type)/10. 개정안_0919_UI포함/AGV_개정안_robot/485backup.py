@@ -115,17 +115,6 @@ class MotorController:
     # 전송 제한(Hz) / 간격(s)
     MIN_TX_INTERVAL_S = 0.01  # 10 ms
 
-    # Modbus read function for Alarm
-    # TODO: 알람 개수 5개 0x00:알람 없음, 0x02:과전류, 0x03:홀센서이상, 0x04: 과부하, 0x06: 과전압, 0x07: 과열
-    # 알람 상태 읽기 바이트 (모터 드라이버 주소 좌 1, 우 2)0x01, (Function) 0x04,(Starting Address) 0x00, 0x01, (No. of Points)0x00, 0x01, (CRC16)0x60, 0x0A
-    # 알람 상태 응답 바이트 (모터 드라이버 주소 좌 1, 우 2)0x01, (N) 0x02, (Data)0x00, 0x00, (CRC16)0xA0, 0x18
-    ALARM_REG = 0x0001  # 알람 주소 값 
-    ALARM_FN = 4
-    ALARM_QTY = 1
-
-    # 읽기 응답 대기(짧게)
-    READ_DEADLINE_S = 0.08
-
     def __init__(self, port: str = "/dev/ttyRS485", baudrate: int = 115200, timeout: float = 1.0, debug: bool = False):
         self.debug = debug
 
@@ -179,20 +168,8 @@ class MotorController:
         self._last_tx_r = None
         self._last_tx_t = 0.0
 
-        # ── 알람 값 스레드 ─────────────────────────────────────────────
-        self._alarm_left  = None
-        self._alarm_right = None
-        self._alarm_last_left  = None
-        self._alarm_last_right = None
-
-        self._alarm_alive = threading.Event()
-        self._alarm_alive.set()
-
-        # ── 스레드 시작  ─────────────────────────────────────────────
         self._tx_thread = threading.Thread(target=self._tx_loop, daemon=True, name="rs485-tx")
-        self._alarm_thread = threading.Thread(target=self._alarm_poll, daemon=True)
         self._tx_thread.start()
-        self._alarm_thread.start()
 
     # ── Properties ───────────────────────────────────────────────────────────
     @property
@@ -264,10 +241,6 @@ class MotorController:
     def stop(self):
         if self.debug:
             print("[RS485] STOP")
-
-        self._read_alarm_once(self.SLAVE_LEFT)
-        self._read_alarm_once(self.SLAVE_RIGHT)
-
         self._write_reg(self.SLAVE_LEFT,  self.REG_SPEED, 0)
         time.sleep(0.03)
         self._write_reg(self.SLAVE_RIGHT, self.REG_SPEED, 0)
@@ -276,68 +249,6 @@ class MotorController:
             self.right_speed = 0
             self._last_tx_l = 0
             self._last_tx_r = 0
-
-    # ── Alarm ─────────────────────────────────────────────────────────
-    def _read_alarm_once(self, slave_id: int):
-        """
-        Modbus 0x03으로 ALARM_REG 한 개(qty=1) 읽어서
-        self._alarm_left / self._alarm_right 에 저장만 함(출력 X).
-        """
-        # 요청 프레임: [sid][0x03][start_hi][start_lo][qty_hi][qty_lo][crc_lo][crc_hi]
-        body = struct.pack(">B B H H", slave_id, self.ALARM_FN, self.ALARM_REG, self.ALARM_QTY)
-        req  = body + self._calc_crc(body)
-
-        # 응답 기대 길이: sid(1) fn(1) bc(1) + data(2*qty) + crc(2)
-        expect_len = 3 + 2*self.ALARM_QTY + 2
-
-        with self.lock:  # write/read 충돌 방지
-            try:
-                try:
-                    self.ser.reset_input_buffer()
-                except Exception:
-                    pass
-                self.ser.write(req)
-
-                end = time.monotonic() + self.READ_DEADLINE_S
-                buf = bytearray()
-                while len(buf) < expect_len and time.monotonic() < end:
-                    chunk = self.ser.read(expect_len - len(buf))
-                    if chunk:
-                        buf.extend(chunk)
-                    else:
-                        time.sleep(0.002)
-                if len(buf) != expect_len:
-                    return  # 실패 시 무시
-
-                data, crc = bytes(buf[:-2]), bytes(buf[-2:])
-                if self._calc_crc(data) != crc:
-                    return
-                if data[0] != (slave_id & 0xFF) or data[1] != self.ALARM_FN:
-                    return
-                bc = data[2]
-                if bc != 2*self.ALARM_QTY:
-                    return
-
-                val  = struct.unpack(">H", data[3:5])[0]
-                if slave_id == self.SLAVE_LEFT:
-                    self._alarm_left = val
-                elif slave_id == self.SLAVE_RIGHT:
-                    self._alarm_right = val
-
-                if self.debug:
-                    print(f"[ALARM] slave={slave_id} val=0x{val:04X}")
-                    
-            except Exception:
-                return
-
-    def _alarm_poll(self):
-        while self._alarm_alive.is_set():
-            with self.lock:
-                idle = (self.left_speed == 0 and self.right_speed == 0)
-            if idle:
-                self._read_alarm_once(self.SLAVE_LEFT)
-                self._read_alarm_once(self.SLAVE_RIGHT)
-            time.sleep(3.0)
 
     # ── Mode & manual controls ───────────────────────────────────────────────
     def set_manual_mode(self):
@@ -473,20 +384,10 @@ class MotorController:
             if (self._last_tx_l, self._last_tx_r) == (l, r):
                 return
         # print(f"L :{l},       R : {r}")
-        # --- 전송 전 알람 1회 읽기 ---
-        self._read_alarm_once(self.SLAVE_LEFT)
-        self._read_alarm_once(self.SLAVE_RIGHT)
-
         # 2) 실제 쓰기(버스)는 락 밖에서
         self._write_reg(self.SLAVE_LEFT,  self.REG_SPEED, l)
         time.sleep(0.03)
         self._write_reg(self.SLAVE_RIGHT, self.REG_SPEED, r)
-        
-         # --- 제어 마침(정지: 0,0) 직후 알람 1회 ---
-        if l == 0 and r == 0:
-            self._read_alarm_once(self.SLAVE_LEFT)
-            self._read_alarm_once(self.SLAVE_RIGHT)
-
         # 3) 마지막 전송값 갱신은 다시 락 안에서
         with self.lock:
             self._last_tx_l = l
@@ -564,19 +465,9 @@ class MotorController:
                         need_send = True
 
             if need_send:
-                # 전송 전 알람
-                self._read_alarm_once(self.SLAVE_LEFT)
-                self._read_alarm_once(self.SLAVE_RIGHT)
-
                 self._write_reg(self.SLAVE_LEFT,  self.REG_SPEED, l_to_send)
                 time.sleep(0.03)
                 self._write_reg(self.SLAVE_RIGHT, self.REG_SPEED, r_to_send)
-
-                # 정지(0,0) 전송이었다면 전송 후 알람
-                if l_to_send == 0 and r_to_send == 0:
-                    self._read_alarm_once(self.SLAVE_LEFT)
-                    self._read_alarm_once(self.SLAVE_RIGHT)
-
                 with self.lock:
                     self._last_tx_l = l_to_send
                     self._last_tx_r = r_to_send
@@ -587,7 +478,6 @@ class MotorController:
     # ── 종료 훅 ──────────────────────────────────────────────────────────────
     def close(self):
         self._alive.clear()
-        self._alarm_alive.clear()
         try:
             if self.ser and self.ser.is_open:
                 self.ser.close()

@@ -5,6 +5,7 @@ import sys, traceback
 import socket
 import threading
 import time
+import numpy as np
 # from dataclasses import dataclass
 from queue import Queue, Empty
 from typing import Optional, List, Set, Tuple
@@ -20,7 +21,7 @@ from encoder_pico import AGVENCODER
 # Config & Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-DEBUG = False
+DEBUG = True
 
 def _hx(b: bytes) -> str:
     return " ".join(f"{x:02X}" for x in b)
@@ -34,7 +35,8 @@ class Config(object):
         self.lidar_baud = 115200
         self.pico_port = "/dev/ttyPICO"
         self.pico_baud = 115200
-        self.camera_device = 0
+        self.front_camera_device = "/dev/video-front"   # video 1, 1
+        self.back_camera_device = "/dev/video-back"     # video 0, 0
         self.ka_idle = 3
         self.ka_intvl = 1
         self.ka_cnt = 2
@@ -249,12 +251,14 @@ class ClientSession:
         t_disp   = threading.Thread(target=self._dispatch_loop, name=f"dispatch-{self.addr}", daemon=True)
         t_reader = threading.Thread(target=self._reader_loop, name=f"reader-{self.addr}", daemon=True)
         t_watch  = threading.Thread(target=self._motion_watch_loop, name=f"motionwatch-{self.addr}", daemon=True)
+        t_alarm  = threading.Thread(target=self._alarm_watch_loop,  name=f"alarm-{self.addr}", daemon=True)
 
         t_disp.start()
         t_reader.start()
         t_watch.start()
+        t_alarm.start()
 
-        self._threads.extend([t_disp, t_reader, t_watch])
+        self._threads.extend([t_disp, t_reader, t_watch, t_alarm])
         # for t in self._threads:
         #     t.start()
 
@@ -391,18 +395,26 @@ class ClientSession:
                 drive     = None
                 speed_sel = None
                 rotate    = None
-                hi=mid=lo = 0
+                hi=lo = 0
 
                 if b0 == 0:        # 수동
-                    drive, speed_sel, rotate = b1, b2, b3
+                    drive = b1
+                    speed_sel = b2
+                    rotate = b3
                 elif b0 == 1:      # 자동
-                    drive, speed_sel, rotate = b1, b2, 0
+                    drive = b1
+                    speed_sel = b2
+                    rotate = 0
                 elif b0 == 0x02:   # 거리 입력
-                    hi, mid, lo = b1, b2, b3
+                    hi = b1 
+                    lo = b2
 
                 if DEBUG:
                     print(f"[DISP] b0={b0:#04x} drive/speed/rot={drive}/{speed_sel}/{rotate} "
                         f"status={status_call} power={sbc_power}")
+
+                # server 코드 실행되자마자 모터 servo 풀어서 바로 움직일 수 있게 유도 (제어 명령 받고 나서 풀리는게 아니라 제어 명령 받기전에 풀어버리기, 외력으로도 움직일 수 있게)
+                self._ensure_servo_on()
 
                 # ── 모드 전환
                 try:
@@ -411,6 +423,7 @@ class ClientSession:
                         tracer.prev_encoder_left = tracer.prev_encoder_right = 0
                         motor.get_drive(drive or 0)
                         motor.set_manual_mode()
+                        # motor.set_rotate_map(0)
                         encoder.reset_counter()
                         if DEBUG:
                             print("[DISP] -> manual mode")
@@ -419,6 +432,7 @@ class ClientSession:
                         motor.prev_encoder_left = motor.prev_encoder_right = 0
                         encoder.reset_counter()
                         motor.set_auto_mode()
+                        # motor.set_rotate_map(0)
                         if DEBUG:
                             print("[DISP] -> auto mode")
 
@@ -437,9 +451,9 @@ class ClientSession:
                         #     pass
                         if b0 == 0x02:
                             meters = hi
-                            hundredths = mid
-                            thousandths = (lo // 10)
-                            target_mm = meters * 1000 + hundredths * 10 + thousandths
+                            thousandths = lo
+                            target_m = meters * 100 + thousandths
+                            target_mm = target_m * 10
                             motor.get_distance(target_mm)
                             motor.set_remaining_distance(target_mm)
                             motor.traveled_mm = 0
@@ -468,7 +482,7 @@ class ClientSession:
                                 print("[DISP] manual drive=0 -> EMIT STOP")
                             self._emit_motor_and_battery(0)
                         else:
-                            self._ensure_servo_on()
+                            # self._ensure_servo_on()
                             # try:
                             #     from rs485_motor import MotorController as _MC
                             #     spmap = getattr(_MC, "SPEED_MAP", {1:250,2:500,3:750,4:1000,5:1250})
@@ -502,9 +516,9 @@ class ClientSession:
                     elif self._set_mode == 1:
                         if b0 == 0x02:
                             meters = hi
-                            hundredths = mid
-                            thousandths = (lo // 10)
-                            target_mm = meters * 1000 + hundredths * 10 + thousandths
+                            thousandths = lo
+                            target_m = meters * 100 + thousandths
+                            target_mm = target_m * 10
                             tracer.get_distance(target_mm)
                             tracer.set_remaining_distance(target_mm)
                             tracer.traveled_mm = 0
@@ -537,11 +551,13 @@ class ClientSession:
                                 remaining = max(0, tracer.target_distance_mm - traveled)
                                 tracer.set_remaining_distance(remaining)
                         elif drive == 1:
-                            self._ensure_servo_on()
+                            # self._ensure_servo_on()
                             tracer.set_drive_mode(1)
                             if tracer.no_line:
                                 self._send(bytes([0xA1, 1, 4, 0]))
                                 self._emit_motor_and_battery(0)
+                            else:
+                                self._send(bytes([0xA1, 0, 0, 0]))
                             self._emit_motor_and_battery(1)
                             if tracer.target_distance_mm > 0:
                                 tracer.start_distance_tracing(speed_sel=speed_sel)
@@ -549,11 +565,13 @@ class ClientSession:
                                 tracer.start_basic_tracing(speed_sel=speed_sel)
 
                         elif drive == 2:
-                            self._ensure_servo_on()
+                            # self._ensure_servo_on()
                             tracer.set_drive_mode(2)
                             if tracer.no_line:
                                 self._send(bytes([0xA1, 1, 4, 0]))
                                 self._emit_motor_and_battery(0)
+                            else:
+                                self._send(bytes([0xA1, 0, 0, 0]))
                             self._emit_motor_and_battery(2)
                             # 목표 거리 값 있으면 거리 라인트레이싱, 없으면 기본 라인트레이싱
                             if tracer.target_distance_mm > 0:
@@ -650,17 +668,17 @@ class ClientSession:
                 break
             except Exception as e:
                 print(f"[LIDAR] stream error: {e}")
-            time.sleep(0.5)
+            time.sleep(0.1)
 
     def _motion_watch_loop(self):
         """
-        인코더 펄스 변화를 100ms 간격으로 관찰하여
+        인코더 펄스 변화를 100ms(=0.1s) → 1000ms(=1s) 수정 필요 할 수 있음 간격으로 관찰하여
         정지<->전진/후진 전환 '시점에만' 1회 전송.
         """
         encoder = self.devices.encoder
         motor   = self.devices.motor
         prev_left, prev_right = 0, 0
-        THRESH_PULSES = 10
+        THRESH_PULSES = 100
 
         while self._alive.is_set():
             try:
@@ -723,34 +741,178 @@ class ClientSession:
             elif lidar_st == 1:
                 self._send(bytes([0xA1, 1, 3, 0]))      # LiDAR 오류)
 
+    def _alarm_watch_loop(self):
+        """
+        MotorController의 좌/우 원시 알람 값을 폴링해서,
+        '알람이 발생'했을 때만 [0xA2, 3, ui_code, 0]을 1회 전송.
+        (정상 상태로 복귀할 때는 아무 것도 보내지 않음)
+        """
+        motor = self.devices.motor
+
+        # 마지막으로 보낸 UI 알람 코드(중복 억제용)
+        last_sent = None
+
+        # 원시값→UI 코드 매핑
+        # 0(HALL), 1(저전압), 2(과부하), 3(파라미터), 4(과열), 5(과전압), 6(과속도), 7(과전류)
+        # raw 코드는 매뉴얼 기준으로 아는 것만 매핑
+        RAW_TO_UI = {
+            0x0003: 0,  # HALL 센서 이상
+            # 0x0001: 1,  # 저전압 (메뉴얼 값 확인 후 활성화)
+            0x0004: 2,  # 과부하
+            # 0x????: 3,  # 파라미터 에러 (메뉴얼 값 확인 후)
+            0x0007: 4,  # 과열
+            0x0006: 5,  # 과전압
+            # 0x????: 6,  # 과속도 (메뉴얼 값 확인 후)
+            0x0002: 7,  # 과전류
+        }
+
+        def pick_ui_code(left_raw, right_raw):
+            # 우선순위: 좌측->우측(동시에 서로 다른 알람이면 좌측 우선; 필요시 로직 변경)
+            for raw in (left_raw, right_raw):
+                if raw is None or raw == 0x0000:
+                    continue
+                ui = RAW_TO_UI.get(raw)
+                if ui is not None:
+                    return ui
+            return None
+
+        while self._alive.is_set():
+            try:
+                l_raw, r_raw = motor.get_alarm_codes()
+                ui_code = pick_ui_code(l_raw, r_raw)
+
+                # 알람 "발생" 시점에만 1회 전송 (같은 코드 반복 송신 방지)
+                if ui_code is not None and ui_code != last_sent:
+                    self._send(bytes([0xA2, 3, ui_code & 0xFF, 0x00]))
+                    last_sent = ui_code
+
+                # 정상으로 돌아왔을 때는 아무 것도 보내지 않음(요청 사양)
+            except Exception:
+                pass
+            time.sleep(0.2)  # 서버측 확인 주기(버스 부하와 무관)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Camera worker (글로벌 1개)
 # ──────────────────────────────────────────────────────────────────────────────
+""" 카메라 2대 열어 놓고 대기 전환 시 즉시 동작하지만 USB대역 및 CPU 사용량 증가 """
+# def camera_worker(cfg: Config, devices: SystemDevices, alive: threading.Event):
+#     tracer = devices.tracer
+#     cap_front = cv2.VideoCapture(cfg.front_camera_device)
+#     cap_back = cv2.VideoCapture(cfg.back_camera_device)
 
+#     if not cap_front.isOpened():
+#         print("[CAM] Cannot open front camera")
+#         return
+#     if not cap_back.isOpened():
+#         print("[CAM] Cannot open back camera")
+#         return
+
+#     # (선택) 지연 줄이기: 버퍼 크기 1
+#     try:
+#         cap_front.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+#         cap_back.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+#     except Exception:
+#         pass
+
+#     try:
+#         while alive.is_set():
+#             ok_f, frame_front = cap_front.read()
+#             ok_b, frame_back  = cap_back.read()
+
+#             if not ok_f and not ok_b:
+#                 print("[CAM] Both cameras failed")
+#                 break
+#             if not ok_f and ok_b:
+#                 active = frame_back
+#             elif ok_f and not ok_b:
+#                 active = frame_front
+#             else:
+#                 # 둘 다 성공 → 진행 방향에 맞춰 선택
+#                 if tracer.auto_move == 2:       # 후진
+#                     active = frame_back
+#                 else:                            # 전진(1) 또는 정지(0) 기본값은 전방
+#                     active = frame_front
+
+#             # 자동 모드가 아니면 안전 정지
+#             if tracer.auto_move not in (1, 2) and getattr(tracer.motor, "get_mode", "") == "auto":
+#                 tracer.motor.send_speeds(0, 0)
+
+#             # 선택된 프레임만 처리
+#             try:
+#                 tracer.process_frame(active)
+#             except Exception:
+#                 pass
+#     finally:
+#         cap_front.release()
+#         cap_back.release()
+#         cv2.destroyAllWindows()
+
+""" 명령 값에 따라 카메라 1대만 열기 사용량은 줄지만 전호나 시 약간의 지연 생김 """
 def camera_worker(cfg: Config, devices: SystemDevices, alive: threading.Event):
     tracer = devices.tracer
-    cap = cv2.VideoCapture(cfg.camera_device)
-    if not cap.isOpened():
-        print("[CAM] Cannot open camera")
-        return
+    active_dev = None
+    cap = None
+
     try:
         while alive.is_set():
+            mode = tracer.auto_move  # 1=전방, 2=후방
+            want_dev = cfg.back_camera_device if mode == 2 else cfg.front_camera_device
+
+            if want_dev != active_dev:
+                if cap:
+                    cap.release()
+                    cap = None
+                cap = cv2.VideoCapture(want_dev)
+                if not cap.isOpened():
+                    print(f"[CAM] open fail: {want_dev}")
+                    time.sleep(0.2)
+                    continue
+                active_dev = want_dev
+
+                # 실제 프레임 출처 표기 (후방이면 True)
+                tracer.rear_view = (want_dev == cfg.back_camera_device)
+
+                # 전환 시 컨트롤 잔상 리셋
+                if getattr(tracer, "_last_rear_view", None) != tracer.rear_view:
+                    tracer.prev_error = 0.0
+                    tracer.prev_L = tracer.prev_R = 0
+                    tracer.initial_center_set = False
+                    tracer._last_rear_view = tracer.rear_view
+
+                # 카메라 전환 직후 워밍업
+                for _ in range(3):
+                    cap.read()
+
+                # 루프 안에서 읽을 때(지연 줄이기용):
+                # 오래된 프레임 1~2장 버리고 최신으로 맞춤
+                for _ in range(1):
+                    cap.grab()
+                ok, frame = cap.retrieve()
+                if not ok:
+                    time.sleep(0.05)
+                    continue
+
+            if not cap:
+                time.sleep(0.05)
+                continue
+
             ok, frame = cap.read()
             if not ok:
-                print("[CAM] Frame grab failed")
-                break
+                print("[CAM] read fail")
+                time.sleep(0.05)
+                continue
 
-            # 자동 모드가 아니면 안전 정지
-            if tracer.auto_move != 1 and getattr(tracer.motor, "get_mode", "") == "auto":
+            # 자동 아니면 안전정지
+            if tracer.auto_move not in (1, 2) and getattr(tracer.motor, "get_mode", "") == "auto":
                 tracer.motor.send_speeds(0, 0)
 
-            # 프레임 처리(표시는 비활성화)
             try:
                 tracer.process_frame(frame)
             except Exception:
                 pass
     finally:
-        cap.release()
+        if cap: cap.release()
+        cv2.destroyAllWindows()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Control Server (accept loop)
@@ -808,7 +970,6 @@ class ControlServer:
 # ──────────────────────────────────────────────────────────────────────────────
 # main
 # ──────────────────────────────────────────────────────────────────────────────
-
 def main():
     print("[BOOT] starting server process"); sys.stdout.flush()
     cfg = Config()

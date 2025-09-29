@@ -85,7 +85,8 @@ class LiDAR:
 
         # 6자리로 제한
         abs_val = max(0, min(999_999, abs_val))
-        dist_str = f"{abs_val:06d}"
+        raw_dist = abs(abs_val) * 10
+        dist_str = f"{raw_dist:06d}"
         hi  = int(dist_str[0:2])
         mid = int(dist_str[2:4])
         lo  = int(dist_str[4:6])
