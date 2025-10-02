@@ -1,6 +1,7 @@
-0718일자 최종 코드
+0930일자 최종 코드
 
-27.1144에 맞춰서 재 코딩한 pico 및 lidar 코드
+agv_rail_pico_{MMDD}.py + lidar_re_{MMDD}.py
 
-주의 꼭 pico_protocal_remake.py와 lidar_re.py 코드를 같이 쓸 것
+{MMDD} 맞춰서 같이 사용할 것
 
+0930일자로 만든 코드가 마지막 업데이트 코드이며 그 이전 코드들은 동작은 하나 미비한 오류점들 있음
