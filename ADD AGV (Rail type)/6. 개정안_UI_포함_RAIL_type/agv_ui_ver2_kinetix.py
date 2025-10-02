@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
 
 from PyQt5.QtGui import QIcon, QPixmap, QTextCursor
 from PyQt5 import QtGui
-from PyQt5.QtCore import Qt, QRectF, QTimer
+from PyQt5.QtCore import Qt, QRectF, QTimer, pyqtSignal, pyqtSlot
 
 # PICO_IP        = "192.168.100.2"
 # PICO_CTRL_PORT = 5024  # pico 에 맞춤
@@ -19,6 +19,10 @@ from PyQt5.QtCore import Qt, QRectF, QTimer
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
 class ControlUI(QWidget):
+    batteryBinChanged = pyqtSignal(int)    # 0~9
+    motorStateChanged = pyqtSignal(int)    # 0:STOP 1:FWD 2:BWD
+    lidarLogLine     = pyqtSignal(str)
+    controlLogLine   = pyqtSignal(str)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AGV Controller")
@@ -49,6 +53,11 @@ class ControlUI(QWidget):
         self._build_ui()
         # self.update_battery(70) # 확인용도
         # self._start_reader()
+
+        self.batteryBinChanged.connect(self._on_battery_bin, type=Qt.QueuedConnection)
+        self.motorStateChanged.connect(self._set_drive_indicator_from_status, type=Qt.QueuedConnection)
+        self.lidarLogLine.connect(self._append_lidar_log, type=Qt.QueuedConnection)
+        self.controlLogLine.connect(self._append_control_log, type=Qt.QueuedConnection)
     
     # === 현재 동작 표시용 스타일===
     _LABEL_ACTIVE = """
@@ -69,6 +78,31 @@ class ControlUI(QWidget):
             padding: 6px 0;
         }
     """
+
+    @pyqtSlot(str)
+    def _append_lidar_log(self, line: str):
+        self.lidar_log.append(line)
+        self.lidar_log.moveCursor(QTextCursor.End)
+
+    @pyqtSlot(str)
+    def _append_control_log(self, line: str):
+        self.log_control.append(line)
+        self.log_control.moveCursor(QTextCursor.End)
+
+    @pyqtSlot(int)
+    def _on_battery_bin(self, bin_val: int):
+        # 기존 update_battery 내용 그대로 옮김
+        bin_val = max(0, min(9, bin_val))
+        filled = bin_val
+        if bin_val <= 2:      fill_color = "#ff3b30"
+        elif bin_val <= 5:    fill_color = "#ff9500"
+        elif bin_val <= 7:    fill_color = "#ffcc00"
+        else:                 fill_color = "#34c759"
+        empty_css  = "background: #e0e0e0; border-radius: 2px;"
+        filled_css = f"background: {fill_color}; border-radius: 2px;"
+        for i, box in enumerate(self.batt_boxes):
+            box.setStyleSheet(filled_css if i < filled else empty_css)
+            box.update()
 
     def _set_controls_enabled(self, on: bool):
         for w in [self.btn_auto, self.btn_man,
@@ -415,7 +449,8 @@ class ControlUI(QWidget):
                             dist_m = dist_m
                         else:
                             dist_m = -dist_m
-                        self.lidar_log.append(f"[FRAME] LIDAR dist: {dist_m:.3f} m (status={status})")
+                        # self.lidar_log.append(f"[FRAME] LIDAR dist: {dist_m:.3f} m (status={status})")
+                        self.lidarLogLine.emit(f"[FRAME] LIDAR dist: {dist_m:.3f} m (status={status})")
                         self.lidar_log.moveCursor(QTextCursor.End)
 
                     elif len(self.buffer) >= 3 and self.buffer[0] == 0xD2:
@@ -423,7 +458,8 @@ class ControlUI(QWidget):
                         del self.buffer[:3]
                         resp_dist = hi * 100 + lo
                         pico_dist = resp_dist / 100.0 
-                        self.log_control.append(f"[FRAME] Target distance set: {pico_dist:.2f} m")
+                        # self.log_control.append(f"[FRAME] Target distance set: {pico_dist:.2f} m")
+                        self.controlLogLine.emit(f"[FRAME] Target distance set: {pico_dist:.2f} m")
                         self.log_control.moveCursor(QTextCursor.End)
 
                     # 텍스트로 출력할 필요는 없음
@@ -433,7 +469,8 @@ class ControlUI(QWidget):
                         # 표시를 서버 상태에 동기화
                         if state != self._last_motor_state:
                             self._last_motor_state = state
-                            self._set_drive_indicator_from_status(state)
+                            # self._set_drive_indicator_from_status(state)
+                            self.motorStateChanged.emit(state)
                             # txt = "Motor STOP" if state == 0 else ("Motor RUN (FORWARD)" if state == 1 else "Motor RUN (BACKWARD)" if state == 2 else "UNKNOWN")
                             # self.log_control.append(f"[FRAME] Motor Status: {txt}")
                             self.log_control.moveCursor(QTextCursor.End)
@@ -445,7 +482,8 @@ class ControlUI(QWidget):
                         if b1 == 0x02:
                             # 배터리 bin (0, 1, 2, 3, ..., 9로 받음)
                             pct = b3
-                            self.update_battery(pct)
+                            self.batteryBinChanged.emit(b3)
+                            # self.update_battery(pct)
                             # self.log_control.append(f"[FRAME] Battery bin={b3} (~{pct}%)")
                         else:
                             if b1 == 0:
@@ -464,14 +502,32 @@ class ControlUI(QWidget):
 
                 # ─── 2) 텍스트 응답 처리 ─────────────────────
                 #    (printable ASCII + '\n' 만 걸러내기)
-                while b'\n' in self.buffer:
-                    idx  = self.buffer.find(b'\n')
-                    line = self.buffer[:idx+1]
-                    del self.buffer[:idx+1]
-                    text = line.decode('utf-8', errors='ignore').strip()
-                    if text and all(32 <= ord(c) <= 126 for c in text):
-                        self.log_control.append(f"[RESP] {text}")
-                        self.log_control.moveCursor(QTextCursor.End)
+                # while b'\n' in self.buffer:
+                #     idx  = self.buffer.find(b'\n')
+                #     line = self.buffer[:idx+1]
+                #     del self.buffer[:idx+1]
+                #     text = line.decode('utf-8', errors='ignore').strip()
+                #     if text and all(32 <= ord(c) <= 126 for c in text):
+                #         # self.log_control.append(f"[RESP] {text}")
+                #         self.controlLogLine.emit(f"[RESP] {text}")
+                #         self.log_control.moveCursor(QTextCursor.End)
+                while True:
+                    idx = self.buffer.find(b'\n')
+                    if idx == -1:
+                        break
+                    candidate = self.buffer[:idx+1]  # 아직 삭제하지 않음
+                    try:
+                        decoded = candidate.decode('ascii')  # 엄격하게 ascii 시도
+                    except UnicodeDecodeError:
+                        # 이건 텍스트가 아님 → 건드리지 말고 빠져나가 다음 recv에서 이어 파싱
+                        break
+                    # 모두 ASCII 인쇄 가능문자 + CR/LF/TAB 이면 텍스트로 간주
+                    if all((32 <= ord(c) <= 126) or c in '\r\n\t' for c in decoded):
+                        del self.buffer[:idx+1]
+                        self.controlLogLine.emit(f"[RESP] {decoded.strip()}")
+                    else:
+                        break
+
         except Exception as e:
             self.log_control.append(f"[Reader] stopped: {e}")
         finally:
@@ -541,13 +597,23 @@ class ControlUI(QWidget):
         self.speed = dist_lo
         self._send_frame()
 
+        # # --- 상태 복원 ---
+        # self.mode   = 1
+        # self.drive  = old_drive
+        # self.speed  = old_speed
+        # self._update('mode', 1)
+        # self._update('drive', old_drive)
+        # self._update('speed', old_speed)
         # --- 상태 복원 ---
-        self.mode   = 1
-        self.drive  = old_drive
-        self.speed  = old_speed
-        self._update('mode', 1)
-        self._update('drive', old_drive)
-        self._update('speed', old_speed)
+        self.mode, self.drive, self.speed = 1, old_drive, old_speed
+        # UI 토글만 동기화 (전송 없음)
+        self.btn_auto.setChecked(True)
+        self.btn_man.setChecked(False)
+        self.btn_stop.setChecked(old_drive == 0)
+        self.btn_fwd.setChecked(old_drive == 1)
+        self.btn_bwd.setChecked(old_drive == 2)
+        for b in self.speed_buttons:
+            b.setChecked(int(b.text()) == old_speed)
         
     def _clear_dist(self):
         self.mode=3
