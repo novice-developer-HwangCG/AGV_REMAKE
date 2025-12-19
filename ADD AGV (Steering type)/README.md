@@ -1,62 +1,41 @@
-<--- 통신 프로토콜 (구) --->
+<--- 통신 프로토콜 (1219 Updated) --->
 
-노트북 → 젯슨
-Byte0 │ Mode       │ 0(Manual), 1(Auto), 2(Dist), 3(Dist reset)
-Byte1 │ Drive      │ 0(Stop), 1(FWD), 2(BWD) / if Byte0 == 2 (hi)
-Byte2 │ SpeedSel   │ 0 ~ 9                   / if Byte0 == 2 (mid)
-Byte3 │ Rotate     │ 0(None), 1(LFT), 2(RHT) / if Byte0 == 2 (lo)
-Byte4 │ Status_Call│ 0(AGV), 1(LiDAR on), 2(LiDAR off), 3(LiDAR reset)
-Byte5 │ Power      │ —  0(Null), 1(SBC Power off), 2(ADC/BAT Call) 
-Byte6 │ Reserved3  │ —  (예비 우선은 0)
-Byte7 │ Checksum   │ sum[0..6] & 0xFF 
+Client → Server
+Byte0 = Mode : 0(Manual), 1(Auto), 2(Dist), 3(Dist reset)
+Byte1 = Drive : 0(Stop), 1(FWD), 2(BWD) / if Byte0 == 2 (hi)
+Byte2 = SpeedSel : 0 ~ 9 / if Byte0 == 2 (lo)
+Byte3 = Rotate : 0(None), 1(LFT-L), 2(LHT-M), 3(LFT-H), 4(RHT-L), 5(RHT-M), 6(RHT-H)
+Byte4 = Status_Call : 0(AGV), 1(LiDAR on), 2(LiDAR off), 3(LiDAR reset)
+Byte5 = Power : 0(Null), 1(SBC Power off)
+Byte6 = Reserved : (예비 우선은 0)
+Byte7 = Checksum ： sum[0..6] & 0xFF 
 
-젯슨 → 노트북 (AGV)
-Byte0 │ Frame Header  │ AGV=0xA1, 
-Byte1 │ Status_AGV    │ 0=정상, 1=AGV 상태불량, 2=BAT
-Byte2 │ Error case    │ 1(Pico), 2(motor), 3(LiDAR), 4(None line)
-Byte3 │ None          │ 0
+Server → Client
+Byte0 = Frame Header : 0xA1(AGV)
+Byte1 = Status_AGV : 0(Normal), 1(AGV Error), 2(BAT)
+Byte2 = Error case : 1(MCU), 2(Motor), 3(LiDAR), 4(None line)
+Byte3 = Battery : 0(None), 1(20% Less), 2(20%), ... ,9(90% higher)
 
-Byte0 │ Frame Header  │ LIDAR=0x5A
-Byte1 │ Status_AGV    │ 0=정상, 2=LiDAR 상태불량
-Byte2 │ Dist H   │ 거리 값(mm) 앞 두 자리 (예. 00XXXX)
-Byte3 │ Dist H   │ 거리 값(mm) 중간 두 자리 (예. XX00XX)
-Byte4 │ Dist L   │ 거리 값(mm) 뒤 두 자리 (예. XXXX00)
+Byte0 = Frame Header : 0x5A(LIDAR)
+Byte1 = Status_AGV : 0(Normal), 2(Lidar Error)
+Byte2 = ABS Dist H : 거리 값(mm) 앞 두 자리 (예. 00XXXX)
+Byte3 = ABS Dist M : 거리 값(mm) 중간 두 자리 (예. XX00XX)
+Byte4 = ABS Dist L : 거리 값(mm) 뒤 두 자리 (예. XXXX00)
+Byte5 = REL Dist H : 거리 값(mm) 앞 두 자리 (예. 00XXXX)
+Byte6 = REL Dist M : 거리 값(mm) 중간 두 자리 (예. XX00XX)
+Byte7 = REL Dist L : 거리 값(mm) 뒤 두 자리 (예. XXXX00)
+Byte8 = Sign : 0(양수 +), 1(음수 -)
 
-<--- 통신 프로토콜 (신 250924) --->
-
-노트북 → 젯슨
-Byte0 │ Mode       │ 0(Manual), 1(Auto), 2(Dist), 3(Dist reset)
-Byte1 │ Drive      │ 0(Stop), 1(FWD), 2(BWD) / if Byte0 == 2 (hi)
-Byte2 │ SpeedSel   │ 0 ~ 9                   / if Byte0 == 2 (lo)
-Byte3 │ Rotate     │ 0(None), 1(LFT), 2(RHT)
-Byte4 │ Status_Call│ 0(AGV), 1(LiDAR on), 2(LiDAR off), 3(LiDAR reset)
-Byte5 │ Power      │ —  0(Null), 1(SBC Power off), 2(ADC/BAT Call) 
-Byte6 │ Reserved3  │ —  (예비 우선은 0)
-Byte7 │ Checksum   │ sum[0..6] & 0xFF 
-
-젯슨 → 노트북 (AGV)
-Byte0 │ Frame Header  │ AGV=0xA1
-Byte1 │ Status_AGV    │ 0=정상, 1=AGV 상태불량, 2=BAT
-Byte2 │ Error case    │ 1(Pico), 2(motor), 3(LiDAR), 4(None line)
-Byte3 │ Battery       │ 0(None), 1(20% 이하), 2(20%), ... ,9(90% 이상)
-
-Byte0 │ Frame Header  │ LIDAR=0x5A
-Byte1 │ Status_AGV    │ 0=정상, 2=LiDAR 상태불량
-Byte2 │ Dist H   │ 거리 값(mm) 앞 두 자리 (예. 00XXXX)
-Byte3 │ Dist H   │ 거리 값(mm) 중간 두 자리 (예. XX00XX)
-Byte4 │ Dist L   │ 거리 값(mm) 뒤 두 자리 (예. XXXX00)
-Byte5 │ Sign     │ 0(양수 +), 1(음수 -)
-
-Byte0 │ Frame Header  │ AGV MOTOR=0xA2
-Byte1 │ Motor status  │ 0=정지, 1=전진, 2=후진
-Byte2 │ None          │ 0(None)
-Byte3 │ None          │ 0(None)
+Byte0 = Frame Header : 0xA2(AGV MOTOR)
+Byte1 = Motor status : 0(Stop), 1(FWD), 2(BWD), 3(Alarm)
+Byte2 = None : 0(HALL), 1(저전압), 2(과부하), 3(파라미터), 4(과열), 5(과전압), 6(과속도), 7(과전류)
+Byte3 = None : 0(None)
 
 <--- 각 코드 별 역할 --->
-agv_server.py = 서버 코드 main 역할 (ui에 받은 파라미터 값 처리)
+agv_server.py = 서버 코드 main 역할 (ui에 받은 파라미터 값 처리 + 각 센서 포트 열기)
 encoder_pico.py = pico에게로 부터 ADC 값 및 엔코더 값 받기
 lidar.py = lidar 데이터 받기
-linetracing.py = 카메라 처리 담당 linetracing
+linetracing.py = linetracing
 rs485_motor.py = 모터에게 속도값을 전달하는 코드
 
 
@@ -150,4 +129,5 @@ encoder L, R: 203, 221 ...
 *** 250929 추가 수정 ***
 
 - 모터 드라이버 알람 상태 값 읽기 추가
+
 
