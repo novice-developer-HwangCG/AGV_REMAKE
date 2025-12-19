@@ -75,7 +75,7 @@ rs485_motor.py = 모터에게 속도값을 전달하는 코드
 <--- 참고 --->
 - 엔코더 값 출력 (좌측 바퀴와 우측 바퀴는 반대 방향으로 배치 되어 있음 즉, 좌측 모터는 속도 값을 음수, 우측 모터 속도 값은 양수여야 로봇은 앞으로 전진 함)
 
-'''
+```
 void encoder_irq_handler(uint gpio, uint32_t events)
 {
     if (gpio == L_ENCODER_A)
@@ -83,17 +83,26 @@ void encoder_irq_handler(uint gpio, uint32_t events)
     else if (gpio == R_ENCODER_A)
         R_encoderPos += (gpio_get(R_ENCODER_A) == gpio_get(R_ENCODER_B) ? -1 : 1);
 }
-'''
+```
 
 - 엔코더 코드를 적용 로봇을 전진 시켰을 시 출력된 엔코더 값
+
 encoder L, R: 58, 85
+
 encoder L, R: 73, 101
+
 encoder L, R: 91, 116
+
 encoder L, R: 108, 129
+
 encoder L, R: 128, 145
+
 encoder L, R: 148, 161
+
 encoder L, R: 168, 180
+
 encoder L, R: 186, 200
+
 encoder L, R: 203, 221 ...
 
 - 바퀴 직경 0.12m
@@ -106,20 +115,31 @@ encoder L, R: 203, 221 ...
 - 우측 모터 역뱡향 회전 → 후진, 정방향 회전 → 전진
 
 모터 구간별 속도 (이론상)
+
 250 = 0.123m/s = 0.4431km/h
+
 500 = 0.2462m/s = 0.8862km/h
+
 750 = 0.3692m/s = 1.3293km/h
+
 1000 = 0.4923m/s = 1.7724km/h
+
 1250 = 0.6154m/s = 2.2154km/h
+
 1500 = 0.7385m/s = 2.6585km/h
+
 1750 = 0.8616m/s = 3.1016km/h
+
 2000 = 0.9846m/s = 3.5447km/h
+
 2250 = 1.1077m/s = 3.9878km/h
+
 
 2500rpm 주었을 때 최대 속도 실측 결과 약 5.67km/h
 
 <--- 로직 우선 순위 --->
 - 수동 모드 일 경우 회전 우선 처리 (전진 후진을 원할 시 항상 회전은 None = 0 으로)
+  
 - 자동 모드 일 경우 목표 이동 거리 값 없다면 기본 라인트레이싱
 
 
@@ -165,6 +185,7 @@ encoder L, R: 203, 221 ...
 *** 250929 추가 수정 ***
 
 - 모터 드라이버 알람 상태 값 읽기 추가
+
 
 
 
