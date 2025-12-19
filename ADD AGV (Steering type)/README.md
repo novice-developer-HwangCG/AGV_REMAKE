@@ -60,15 +60,22 @@ Byte3 = None : 0(None)
 
 
 <--- 각 코드 별 역할 --->
+
 agv_server.py = 서버 코드 main 역할 (ui에 받은 파라미터 값 처리 + 각 센서 포트 열기)
+
 encoder_pico.py = pico에게로 부터 ADC 값 및 엔코더 값 받기
+
 lidar.py = lidar 데이터 받기
+
 linetracing.py = linetracing
+
 rs485_motor.py = 모터에게 속도값을 전달하는 코드
 
 
 <--- 참고 --->
 - 엔코더 값 출력 (좌측 바퀴와 우측 바퀴는 반대 방향으로 배치 되어 있음 즉, 좌측 모터는 속도 값을 음수, 우측 모터 속도 값은 양수여야 로봇은 앞으로 전진 함)
+
+'''
 void encoder_irq_handler(uint gpio, uint32_t events)
 {
     if (gpio == L_ENCODER_A)
@@ -76,6 +83,7 @@ void encoder_irq_handler(uint gpio, uint32_t events)
     else if (gpio == R_ENCODER_A)
         R_encoderPos += (gpio_get(R_ENCODER_A) == gpio_get(R_ENCODER_B) ? -1 : 1);
 }
+'''
 
 - 엔코더 코드를 적용 로봇을 전진 시켰을 시 출력된 엔코더 값
 encoder L, R: 58, 85
@@ -157,6 +165,7 @@ encoder L, R: 203, 221 ...
 *** 250929 추가 수정 ***
 
 - 모터 드라이버 알람 상태 값 읽기 추가
+
 
 
 
